@@ -62,6 +62,7 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/agents/{id}/revoke",
             post(routes::admin_revoke_agent),
         )
+        .route("/api/admin/agents/mint", post(routes::agents_mint))
         .route("/api/admin/clients", post(routes::admin_create_client))
         // Ops
         .route("/health", get(routes::health))

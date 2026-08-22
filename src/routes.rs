@@ -1831,3 +1831,109 @@ pub async fn session_check(State(state): State<AppState>, headers: HeaderMap) ->
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
+
+/// Machine endpoint for resource servers (the hub): mint an agent identity
+/// owned by a named human. Authenticated by confidential client Basic creds.
+pub async fn agents_mint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AgentCreate>,
+) -> Response {
+    // Machine auth: svc_ client Basic credentials.
+    let Some(auth_header) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"auth required"})),
+        )
+            .into_response();
+    };
+    let Some(enc) = auth_header.strip_prefix("Basic ") else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"basic required"})),
+        )
+            .into_response();
+    };
+    use base64::Engine;
+    let Ok(dec) = base64::engine::general_purpose::STANDARD.decode(enc) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"bad basic"}))).into_response();
+    };
+    let Ok(txt) = String::from_utf8(dec) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"bad basic"}))).into_response();
+    };
+    let Some((cid, secret)) = txt.split_once(':') else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"bad basic"}))).into_response();
+    };
+    if !cid.starts_with("svc_") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"not a service client"})),
+        )
+            .into_response();
+    }
+    let trusted = state
+        .store
+        .client(cid)
+        .ok()
+        .flatten()
+        .and_then(|c| c.secret_hash)
+        .map(|h| crate::crypto::verify_password(secret, &h))
+        .unwrap_or(false);
+    if !trusted {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"invalid client"})),
+        )
+            .into_response();
+    }
+
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 160 {
+        return err_page("invalid agent name");
+    }
+    let allowed = [
+        "miser:route",
+        "hive:delegate",
+        "relay:call",
+        "sentiel:ingest",
+        "aegis:egress",
+        "patroclus:authz",
+    ];
+    let scopes: Vec<String> = body
+        .scopes
+        .iter()
+        .filter(|s| allowed.contains(&s.as_str()))
+        .cloned()
+        .collect();
+
+    let secret_value = format!("agt_{}", rand_token(32));
+    let hash = match crate::crypto::hash_password(&secret_value) {
+        Ok(h) => h,
+        Err(_) => return err_page("internal"),
+    };
+    let id = format!("agt_{}", rand_token(12));
+    if state
+        .store
+        .create_agent(&id, "usr_system", name, &hash, &scopes, &body.metadata)
+        .is_err()
+    {
+        return err_page("could not create agent");
+    }
+    let _ = state.store.audit(
+        "agent_minted_by_service",
+        None,
+        json!({"agent": id, "client": cid}),
+    );
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "agent_id": id,
+            "secret": secret_value,
+            "note": "Store this secret now — it is not retrievable later.",
+        })),
+    )
+        .into_response()
+}

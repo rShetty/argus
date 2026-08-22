@@ -13,3 +13,7 @@ CREATE TABLE IF NOT EXISTS agents (
     metadata      TEXT NOT NULL DEFAULT '{}'      -- json: service, env, etc.
 );
 CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_user_id);
+
+-- System owner for machine-minted identities (created via /api/admin/agents/mint)
+INSERT OR IGNORE INTO users (id,email,name,password_hash,is_admin,created_at)
+VALUES ('usr_system','system@argus.local','Argus System',NULL,1,0);
