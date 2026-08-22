@@ -1385,6 +1385,7 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> Resp
     .into_response()
 }
 
+#[allow(clippy::result_large_err)] // one-shot error response; not hot-path critical
 async fn bearer_claims(state: &AppState, headers: &HeaderMap) -> Result<tokens::Claims, Response> {
     let tok = headers
         .get(header::AUTHORIZATION)
