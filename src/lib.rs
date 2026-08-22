@@ -80,3 +80,18 @@ pub fn router(state: AppState) -> Router {
         ))
         .with_state(state)
 }
+
+// ── Cookie security policy ───────────────────────────────────────────────────
+// Secure attribute is correct for https deployments; http local/dev must omit
+// it or cookies are silently dropped by HTTP clients.
+
+use std::sync::OnceLock;
+static COOKIE_SECURE: OnceLock<bool> = OnceLock::new();
+
+pub fn init_cookie_secure(external_url: &str) {
+    let _ = COOKIE_SECURE.set(external_url.starts_with("https"));
+}
+
+pub fn cookie_secure() -> bool {
+    *COOKIE_SECURE.get().unwrap_or(&true)
+}

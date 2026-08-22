@@ -20,6 +20,14 @@ fn now() -> u64 {
     tokens::now_epoch()
 }
 
+/// Build a Set-Cookie value with the deployment-correct Secure flag.
+fn set_cookie_value(name: &str, value: &str, max_age: i64) -> String {
+    format!(
+        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{}",
+        crate::cookie_secure()
+    )
+}
+
 fn rand_token(bytes: usize) -> String {
     use rand::RngCore;
     let mut buf = vec![0u8; bytes];
@@ -207,10 +215,7 @@ pub async fn login_form(
         },
     );
     let mut resp = page("Sign in", &body).into_response();
-    append_cookie(
-        &mut resp,
-        format!("{CSRF_COOKIE}={csrf}; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax; Secure"),
-    );
+    append_cookie(&mut resp, set_cookie_value(CSRF_COOKIE, &csrf, 3600));
     resp
 }
 
@@ -278,10 +283,7 @@ pub async fn login_submit(
     let mut resp = Redirect::to(&safe_next(&f.next)).into_response();
     append_cookie(
         &mut resp,
-        format!(
-            "{SESSION_COOKIE}={sid}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax; Secure",
-            state.config.session_ttl
-        ),
+        set_cookie_value(SESSION_COOKIE, &sid, state.config.session_ttl as i64),
     );
     // Rotate CSRF token after auth-state change.
     append_cookie(
@@ -314,10 +316,7 @@ pub async fn register_form(
          <button>Create account</button></form>"
     );
     let mut resp = page("Register", &body).into_response();
-    append_cookie(
-        &mut resp,
-        format!("{CSRF_COOKIE}={csrf}; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax; Secure"),
-    );
+    append_cookie(&mut resp, set_cookie_value(CSRF_COOKIE, &csrf, 3600));
     resp
 }
 
@@ -375,10 +374,7 @@ pub async fn register_submit(
     let mut resp = Redirect::to(&safe_next(&f.next)).into_response();
     append_cookie(
         &mut resp,
-        format!(
-            "{SESSION_COOKIE}={sid}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax; Secure",
-            state.config.session_ttl
-        ),
+        set_cookie_value(SESSION_COOKIE, &sid, state.config.session_ttl as i64),
     );
     append_cookie(
         &mut resp,
@@ -424,14 +420,9 @@ pub async fn github_start(State(state): State<AppState>, Query(q): Query<NextQue
     .into_response();
     append_cookie(
         &mut resp,
-        format!(
-            "{GH_STATE_COOKIE}={state_param}; Path=/; Max-Age=600; HttpOnly; SameSite=Lax; Secure"
-        ),
+        set_cookie_value(GH_STATE_COOKIE, &state_param, 600),
     );
-    append_cookie(
-        &mut resp,
-        format!("{GH_NEXT_COOKIE}={next}; Path=/; Max-Age=600; HttpOnly; SameSite=Lax; Secure"),
-    );
+    append_cookie(&mut resp, set_cookie_value(GH_NEXT_COOKIE, &next, 600));
     resp
 }
 
@@ -597,10 +588,7 @@ pub async fn github_callback(
     let mut resp = Redirect::to(&safe_next(&next)).into_response();
     append_cookie(
         &mut resp,
-        format!(
-            "{SESSION_COOKIE}={sid}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax; Secure",
-            state.config.session_ttl
-        ),
+        set_cookie_value(SESSION_COOKIE, &sid, state.config.session_ttl as i64),
     );
     append_cookie(&mut resp, format!("{GH_STATE_COOKIE}=; Path=/; Max-Age=0"));
     append_cookie(&mut resp, format!("{GH_NEXT_COOKIE}=; Path=/; Max-Age=0"));
@@ -757,10 +745,7 @@ async fn render_consent(
         urlencoding::encode(&hidden),
     );
     let mut resp = page("Consent", &body).into_response();
-    append_cookie(
-        &mut resp,
-        format!("{CSRF_COOKIE}={csrf}; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax; Secure"),
-    );
+    append_cookie(&mut resp, set_cookie_value(CSRF_COOKIE, &csrf, 3600));
     resp
 }
 

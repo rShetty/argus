@@ -15,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(&path)?;
     let listen = cfg.listen.clone();
     let external_url = cfg.external_url.clone();
+    argus::init_cookie_secure(&external_url);
 
     let db_path = if cfg.database.is_empty() {
         "/var/lib/argus/argus.db".to_string()
