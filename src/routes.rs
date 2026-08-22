@@ -1817,3 +1817,14 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
         None => Redirect::to("/login").into_response(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// /session/check — for nginx auth_request SSO gates on product UIs
+// ---------------------------------------------------------------------------
+
+pub async fn session_check(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match current_user(&state, &headers).await {
+        Some(u) if !u.disabled => StatusCode::NO_CONTENT.into_response(),
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}

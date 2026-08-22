@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         // is sent to /login. Prevents 404s on bare id.rajeev.me visits.
         .route("/", get(routes::index))
         .route("/login", get(routes::login_form).post(routes::login_submit))
+        .route("/session/check", get(routes::session_check))
         .route("/logout", post(routes::logout).get(routes::logout_get))
         .route(
             "/register",
