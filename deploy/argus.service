@@ -1,0 +1,17 @@
+[Unit]
+Description=Argus OIDC Identity Provider
+After=network-online.target
+
+[Service]
+User=argus
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/argus/env
+ExecStart=/usr/local/bin/argus /etc/argus/argus.toml
+Restart=always
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/argus
+
+[Install]
+WantedBy=multi-user.target
