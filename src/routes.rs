@@ -1789,3 +1789,31 @@ pub async fn admin_create_client(
     )
         .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// / — landing page (no more 404 on bare visits)
+// ---------------------------------------------------------------------------
+
+pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match current_user(&state, &headers).await {
+        Some(user) => {
+            let role = if user.is_admin {
+                "administrator"
+            } else {
+                "member"
+            };
+            page(
+                "Signed in",
+                &format!(
+                    "<p>You are signed in as <b>{}</b> ({role}).</p>\
+                     <p style=\"font-size:.85rem;color:#94a3b8\">Return to the \
+                     <a href=\"https://governance.rajeev.me/\">Governance Hub</a> — it will \
+                     recognize this session automatically.</p>",
+                    html_escape(&user.email),
+                ),
+            )
+            .into_response()
+        }
+        None => Redirect::to("/login").into_response(),
+    }
+}

@@ -23,6 +23,9 @@ pub fn router(state: AppState) -> Router {
         .route("/.well-known/openid-configuration", get(routes::discovery))
         .route("/jwks.json", get(routes::jwks))
         // Interactive login
+        // Landing page — logged-in users get a profile view, everyone else
+        // is sent to /login. Prevents 404s on bare id.rajeev.me visits.
+        .route("/", get(routes::index))
         .route("/login", get(routes::login_form).post(routes::login_submit))
         .route("/logout", post(routes::logout).get(routes::logout_get))
         .route(
