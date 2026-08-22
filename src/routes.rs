@@ -1375,11 +1375,12 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "agent_id": claims.aud,
             "acting_for": claims.email.clone().unwrap_or_default(),
             "name": agent.map(|a| a.name).unwrap_or_default(),
+            "admin": false,
         })
     } else {
         match state.store.user_by_id(&sub).ok().flatten() {
-            Some(u) => json!({"sub": u.id, "kind": "human", "email": u.email, "name": u.name}),
-            None => json!({"sub": sub}),
+            Some(u) => json!({"sub": u.id, "kind": "human", "email": u.email, "name": u.name, "admin": u.is_admin}),
+            None => json!({"sub": sub, "admin": false}),
         }
     })
     .into_response()
@@ -1489,6 +1490,7 @@ pub async fn introspect(
 // ---------------------------------------------------------------------------
 
 /// Extract the session user; error response when missing.
+#[allow(clippy::result_large_err)]
 async fn require_user(
     state: &AppState,
     headers: &HeaderMap,
