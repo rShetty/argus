@@ -184,7 +184,10 @@ pub async fn login_form(
     let csrf = ensure_csrf_cookie(&headers);
     let next = q.next.unwrap_or_default();
     let gh_enabled = state.config.github_client_id.is_some();
-    let n = urlencoding::encode(&next);
+    // Hidden form field + query param: HTML-escape only (the browser
+    // percent-encodes on submit). URL-encoding here caused double-encoding,
+    // breaking the post-login redirect back into the OIDC flow.
+    let n = html_escape(&next);
     let body = format!(
         "<form method=\"post\" action=\"/login\">\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
@@ -300,7 +303,7 @@ pub async fn register_form(
 ) -> Response {
     let csrf = ensure_csrf_cookie(&headers);
     let next_owned = q.next.unwrap_or_default();
-    let next = urlencoding::encode(&next_owned);
+    let next = html_escape(&next_owned);
     let body = format!(
         "<form method=\"post\" action=\"/register\">\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
