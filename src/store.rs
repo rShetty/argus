@@ -512,3 +512,80 @@ impl Store {
         })
     }
 }
+
+// ---- Admin / client management ----------------------------------------------
+
+impl Store {
+    pub fn list_users(&self) -> anyhow::Result<Vec<User>> {
+        self.with_conn(|c| {
+            let mut st = c.prepare(
+                "SELECT id, email, name, password_hash, github_id, is_admin, disabled FROM users ORDER BY created_at",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(User {
+                    id: r.get(0)?,
+                    email: r.get(1)?,
+                    name: r.get(2)?,
+                    password_hash: r.get(3)?,
+                    github_id: r.get(4)?,
+                    is_admin: r.get::<_, i64>(5)? != 0,
+                    disabled: r.get::<_, i64>(6)? != 0,
+                })
+            })?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
+    pub fn list_agents_all(&self) -> anyhow::Result<Vec<(Agent, String)>> {
+        self.with_conn(|c| {
+            let mut st = c.prepare(
+                "SELECT a.id,a.owner_user_id,a.name,a.secret_hash,a.scopes,a.status,a.created_at,u.email \
+                 FROM agents a JOIN users u ON u.id=a.owner_user_id ORDER BY a.created_at",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok((
+                    Agent {
+                        id: r.get(0)?,
+                        owner_user_id: r.get(1)?,
+                        name: r.get(2)?,
+                        secret_hash: r.get(3)?,
+                        scopes: r.get::<_, String>(4)?
+                            .split(' ')
+                            .filter(|s| !s.is_empty())
+                            .map(String::from)
+                            .collect(),
+                        status: r.get(5)?,
+                        created_at: r.get(6)?,
+                    },
+                    r.get::<_, String>(7)?,
+                ))
+            })?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_client(
+        &self,
+        client_id: &str,
+        secret_hash: Option<&str>,
+        name: &str,
+        redirect_uris: &[String],
+        scopes: &str,
+    ) -> anyhow::Result<()> {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO clients (client_id,secret_hash,name,redirect_uris,scopes,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    client_id,
+                    secret_hash,
+                    name,
+                    redirect_uris.join("\n"),
+                    scopes,
+                    tokens_now()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+}

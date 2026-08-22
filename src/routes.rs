@@ -1483,3 +1483,228 @@ pub async fn introspect(
     }))
     .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// Admin API — session-authenticated admins manage the directory
+// ---------------------------------------------------------------------------
+
+/// Extract the session user; error response when missing.
+async fn require_user(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<crate::store::User, Response> {
+    current_user(state, headers).await.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "login required"})),
+        )
+            .into_response()
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn require_admin(user: &crate::store::User) -> Result<(), Response> {
+    if !user.is_admin {
+        return Err((
+            StatusCode::FORBIDDEN,
+            axum::Json(json!({"error": "admin required"})),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+pub async fn admin_users(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_admin(&user) {
+        return r;
+    }
+    let users = state.store.list_users().unwrap_or_default();
+    axum::Json(json!({"users": users.iter().map(|u| json!({
+        "id": u.id, "email": u.email, "name": u.name,
+        "kind": "human", "admin": u.is_admin, "disabled": u.disabled,
+        "github_linked": u.github_id.is_some(),
+    })).collect::<Vec<_>>() }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct UserStatusUpdate {
+    pub disabled: bool,
+}
+
+pub async fn admin_set_user_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(target): axum::extract::Path<String>,
+    Json(body): Json<UserStatusUpdate>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_admin(&user) {
+        return r;
+    }
+    if user.id == target {
+        return err_page("cannot disable yourself");
+    }
+    let ok = state
+        .store
+        .with_conn(|c| {
+            let n = c.execute(
+                "UPDATE users SET disabled=?2 WHERE id=?1",
+                rusqlite::params![target, body.disabled as i64],
+            )?;
+            anyhow::Ok(n > 0)
+        })
+        .unwrap_or(false);
+    if ok {
+        // Disabling a user kills their sessions immediately.
+        let _ = state.store.with_conn(|c| {
+            c.execute("DELETE FROM sessions WHERE user_id=?1", [&target])?;
+            Ok(())
+        });
+        let _ = state.store.audit(
+            if body.disabled {
+                "user_disabled"
+            } else {
+                "user_enabled"
+            },
+            Some(&target),
+            json!({}),
+        );
+        axum::Json(json!({"id": target, "disabled": body.disabled})).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": "not found"})),
+        )
+            .into_response()
+    }
+}
+
+pub async fn admin_agents(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_admin(&user) {
+        return r;
+    }
+    let agents = state.store.list_agents_all().unwrap_or_default();
+    axum::Json(
+        json!({ "agents": agents.iter().map(|(a, owner_email)| json!({
+        "id": a.id, "name": a.name, "owner": owner_email,
+        "scopes": a.scopes, "status": a.status,
+    })).collect::<Vec<_>>() }),
+    )
+    .into_response()
+}
+
+pub async fn admin_revoke_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_admin(&user) {
+        return r;
+    }
+    match state
+        .store
+        .with_conn(|c| {
+            let n = c.execute(
+                "UPDATE agents SET status='revoked' WHERE id=?1",
+                [agent_id.as_str()],
+            )?;
+            anyhow::Ok(n > 0)
+        })
+        .unwrap_or(false)
+    {
+        true => {
+            let _ = state.store.audit(
+                "agent_revoked_admin",
+                Some(&user.id),
+                json!({"agent": agent_id}),
+            );
+            axum::Json(json!({"agent_id": agent_id, "status": "revoked"})).into_response()
+        }
+        false => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": "not found"})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ClientCreate {
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+    #[serde(default)]
+    pub scopes: String,
+}
+
+/// Register an ecosystem service as an OIDC client. Secret shown once.
+pub async fn admin_create_client(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ClientCreate>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_admin(&user) {
+        return r;
+    }
+    let name = body.name.trim();
+    if name.is_empty() || body.redirect_uris.is_empty() {
+        return err_page("name and at least one redirect_uri required");
+    }
+    for uri in &body.redirect_uris {
+        if !(uri.starts_with("http://localhost") || uri.starts_with("https://")) {
+            return err_page("redirect_uris must be https:// (or http://localhost)");
+        }
+    }
+    let client_id = format!("svc_{}", rand_token(8));
+    let secret = format!("sec_{}", rand_token(32));
+    let hash = match crate::crypto::hash_password(&secret) {
+        Ok(h) => h,
+        Err(_) => return err_page("Internal error"),
+    };
+    if state
+        .store
+        .create_client(
+            &client_id,
+            Some(&hash),
+            name,
+            &body.redirect_uris,
+            &body.scopes,
+        )
+        .is_err()
+    {
+        return err_page("could not register client");
+    }
+    let _ = state.store.audit(
+        "client_created",
+        Some(&user.id),
+        json!({"client": client_id, "name": name}),
+    );
+    (
+        StatusCode::CREATED,
+        axum::Json(json!({
+            "client_id": client_id,
+            "client_secret": secret,
+            "note": "Store this secret now — it is not retrievable later.",
+        })),
+    )
+        .into_response()
+}

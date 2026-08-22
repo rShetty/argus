@@ -47,6 +47,18 @@ pub fn router(state: AppState) -> Router {
             get(routes::agents_list).post(routes::agents_create),
         )
         .route("/api/agents/{id}/status", post(routes::agents_set_status))
+        // Admin directory + client registry
+        .route("/api/admin/users", get(routes::admin_users))
+        .route(
+            "/api/admin/users/{id}/status",
+            post(routes::admin_set_user_status),
+        )
+        .route("/api/admin/agents", get(routes::admin_agents))
+        .route(
+            "/api/admin/agents/{id}/revoke",
+            post(routes::admin_revoke_agent),
+        )
+        .route("/api/admin/clients", post(routes::admin_create_client))
         // Ops
         .route("/health", get(routes::health))
         .layer(axum::middleware::map_response(
