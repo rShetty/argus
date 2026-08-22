@@ -1504,6 +1504,93 @@ async fn require_user(
     })
 }
 
+/// Machine auth for resource servers (the hub): Basic svc_<id>:<secret>
+/// verified against a registered confidential client.
+#[allow(clippy::result_large_err)]
+fn require_machine_client(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(auth) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "auth required"})),
+        )
+            .into_response());
+    };
+    let Some(enc) = auth.strip_prefix("Basic ") else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "basic auth required"})),
+        )
+            .into_response());
+    };
+    use base64::Engine;
+    let Ok(dec) = base64::engine::general_purpose::STANDARD.decode(enc) else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "bad basic"})),
+        )
+            .into_response());
+    };
+    let Ok(txt) = String::from_utf8(dec) else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "bad basic"})),
+        )
+            .into_response());
+    };
+    let Some((cid, sec)) = txt.split_once(':') else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "bad basic"})),
+        )
+            .into_response());
+    };
+    if !cid.starts_with("svc_") {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "not a service client"})),
+        )
+            .into_response());
+    }
+    let ok = state
+        .store
+        .client(cid)
+        .ok()
+        .flatten()
+        .and_then(|c| c.secret_hash)
+        .map(|h| crate::crypto::verify_password(sec, &h))
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "invalid client credentials"})),
+        )
+            .into_response())
+    }
+}
+
+/// Admin check: human admin session OR trusted service client (hub acting
+/// for its logged-in admin). Returns acting principal email.
+#[allow(clippy::result_large_err)]
+async fn admin_principal(state: &AppState, headers: &HeaderMap) -> Result<String, Response> {
+    if let Some(u) = current_user(state, headers).await {
+        if u.is_admin && !u.disabled {
+            return Ok(u.email);
+        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            axum::Json(json!({"error": "admin required"})),
+        )
+            .into_response());
+    }
+    require_machine_client(state, headers)?;
+    Ok("<service>".to_string())
+}
+
 #[allow(clippy::result_large_err)]
 fn require_admin(user: &crate::store::User) -> Result<(), Response> {
     if !user.is_admin {
@@ -1517,11 +1604,7 @@ fn require_admin(user: &crate::store::User) -> Result<(), Response> {
 }
 
 pub async fn admin_users(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let user = match require_user(&state, &headers).await {
-        Ok(u) => u,
-        Err(r) => return r,
-    };
-    if let Err(r) = require_admin(&user) {
+    if let Err(r) = admin_principal(&state, &headers).await {
         return r;
     }
     let users = state.store.list_users().unwrap_or_default();
@@ -1590,11 +1673,7 @@ pub async fn admin_set_user_status(
 }
 
 pub async fn admin_agents(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let user = match require_user(&state, &headers).await {
-        Ok(u) => u,
-        Err(r) => return r,
-    };
-    if let Err(r) = require_admin(&user) {
+    if let Err(r) = admin_principal(&state, &headers).await {
         return r;
     }
     let agents = state.store.list_agents_all().unwrap_or_default();
