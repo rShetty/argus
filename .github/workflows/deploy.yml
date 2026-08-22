@@ -1,0 +1,85 @@
+name: Deploy Argus IdP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: argus-production
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust toolchain
+        run: |
+          rustup update stable
+          rustup component add rustfmt clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain (linux target)
+        run: |
+          rustup update stable
+          rustup target add x86_64-unknown-linux-gnu
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package delivery bundle
+        run: |
+          mkdir -p bundle
+          cp target/x86_64-unknown-linux-gnu/release/argus bundle/
+          cp argus.toml.example bundle/
+          cp deploy/argus.service bundle/
+          cp deploy/nginx-vhost.conf bundle/
+          tar -czf argus-bundle.tar.gz -C bundle .
+
+      - name: Ship bundle to VPS
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: argus-bundle.tar.gz
+          target: /tmp/
+
+      - name: Install, restart service, health-gate
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            mkdir -p /etc/argus /var/lib/argus
+            id argus >/dev/null 2>&1 || useradd --system --home-dir /var/lib/argus --create-home --shell /usr/sbin/nologin argus
+            mkdir -p /tmp/argus-extract
+            tar -xzf /tmp/argus-bundle.tar.gz -C /tmp/argus-extract
+            install -m 755 /tmp/argus-extract/argus /usr/local/bin/argus
+            if [ ! -s /etc/argus/argus.toml ]; then
+              install -m 644 /tmp/argus-extract/argus.toml.example /etc/argus/argus.toml
+            fi
+            install -m 644 /tmp/argus-extract/argus.service /etc/systemd/system/argus.service
+            chown -R argus:argus /var/lib/argus
+            systemctl daemon-reload
+            systemctl enable argus
+            systemctl restart argus
+            rm -rf /tmp/argus-extract /tmp/argus-bundle.tar.gz
+            sleep 3
+            curl -sf http://127.0.0.1:8443/health && echo "ARGUS HEALTH OK"
