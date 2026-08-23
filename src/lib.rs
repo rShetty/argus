@@ -33,6 +33,14 @@ pub fn router(state: AppState) -> Router {
             "/register",
             get(routes::register_form).post(routes::register_submit),
         )
+        .route(
+            "/forgot-password",
+            get(routes::forgot_password_form).post(routes::forgot_password_submit),
+        )
+        .route(
+            "/reset-password",
+            get(routes::reset_password_form).post(routes::reset_password_submit),
+        )
         // GitHub OAuth upstream
         .route("/auth/github", get(routes::github_start))
         .route("/auth/github/callback", get(routes::github_callback))

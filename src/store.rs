@@ -35,10 +35,49 @@ impl Store {
     fn migrate(&self) -> anyhow::Result<()> {
         const M001: &str = include_str!("../migrations/001_init.sql");
         const M002: &str = include_str!("../migrations/002_agents.sql");
+        const M003: &str = include_str!("../migrations/003_password_reset.sql");
         self.with_conn(|c| {
             c.execute_batch(M001)?;
             c.execute_batch(M002)?;
+            c.execute_batch(M003)?;
             Ok(())
+        })
+    }
+
+    // ---- password reset ----
+
+    pub fn put_reset_token(
+        &self,
+        token: &str,
+        user_id: &str,
+        now_epoch: u64,
+        ttl_secs: u64,
+    ) -> anyhow::Result<()> {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO password_reset_tokens (token, user_id, created_at, expires_at, used) VALUES (?1, ?2, ?3, ?4, 0)",
+                rusqlite::params![token, user_id, now_epoch as i64, (now_epoch + ttl_secs) as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Returns Some(user_id) if the token is valid and unused; marks it used.
+    pub fn consume_reset_token(&self, token: &str, now_epoch: u64) -> anyhow::Result<Option<String>> {
+        self.with_conn(|c| {
+            let result = c.query_row(
+                "SELECT user_id FROM password_reset_tokens WHERE token=?1 AND used=0 AND expires_at > ?2",
+                rusqlite::params![token, now_epoch as i64],
+                |row| row.get::<_, String>(0),
+            );
+            match result {
+                Ok(user_id) => {
+                    c.execute("UPDATE password_reset_tokens SET used=1 WHERE token=?1", [token])?;
+                    Ok(Some(user_id))
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
         })
     }
 }

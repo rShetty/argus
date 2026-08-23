@@ -22,9 +22,9 @@ fn now() -> u64 {
 
 /// Build a Set-Cookie value with the deployment-correct Secure flag.
 fn set_cookie_value(name: &str, value: &str, max_age: i64) -> String {
+    let secure = if crate::cookie_secure() { "; Secure" } else { "" };
     format!(
-        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{}",
-        crate::cookie_secure()
+        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
     )
 }
 
@@ -216,7 +216,7 @@ pub async fn login_form(
          <form method=\"get\" action=\"/auth/github\">\
          <input type=\"hidden\" name=\"next\" value=\"{n}\">\
          <button class=\"gh\" {}>Sign in with GitHub</button></form>\
-         <p style=\"font-size:.8rem;text-align:center\"><a href=\"{register_href}\">Create account</a></p>",
+         <p style=\"font-size:.8rem;text-align:center\"><a href=\"{register_href}\">Create account</a> · <a href=\"/forgot-password\">Forgot password?</a></p>",
         if gh_enabled {
             ""
         } else {
@@ -426,6 +426,138 @@ pub async fn logout_get(
     Query(q): Query<LogoutQuery>,
 ) -> Response {
     logout(state, headers, Query(q)).await
+}
+
+// ---------------------------------------------------------------------------
+// Password reset
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ForgotForm {
+    email: String,
+    #[serde(default)]
+    csrf: String,
+}
+
+pub async fn forgot_password_form(State(_state): State<AppState>, headers: HeaderMap) -> Response {
+    let csrf = ensure_csrf_cookie(&headers);
+    let body = format!(
+        "<form method=\"post\" action=\"/forgot-password\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <input type=\"email\" name=\"email\" placeholder=\"Email\" required autofocus>\
+         <button>Send reset link</button></form>\
+         <p style=\"font-size:.8rem;text-align:center\"><a href=\"/login\">Back to sign in</a></p>"
+    );
+    let mut resp = page("Forgot password", &body).into_response();
+    append_cookie(&mut resp, set_cookie_value(CSRF_COOKIE, &csrf, 3600));
+    resp
+}
+
+pub async fn forgot_password_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ForgotForm>,
+) -> Response {
+    if !csrf_ok(&headers, &f.csrf) {
+        return err_page("Invalid CSRF token");
+    }
+    let email = f.email.trim().to_lowercase();
+    let user = state.store.user_by_email(&email).ok().flatten();
+    // Always show the same message to prevent email enumeration.
+    let generic = "<p>If an account with that email exists, a reset link has been generated below.</p>";
+    let mut body = generic.to_string();
+    if let Some(u) = user {
+        let token = rand_token(32);
+        let ttl: u64 = 30 * 60; // 30 minutes
+        let _ = state
+            .store
+            .put_reset_token(&token, &u.id, tokens::now_epoch() as u64, ttl);
+        let link = format!("/reset-password?token={token}");
+        body.push_str(&format!(
+            "<p style=\"font-size:.85rem\">Reset link (valid 30 min):<br><a href=\"{link}\">{link}</a></p><p style=\"font-size:.75rem;color:#6b7280\">In production this link would be emailed instead of shown.</p>"
+        ));
+        let _ = state
+            .store
+            .audit("password_reset_requested", Some(&u.id), json!({"email": email}));
+    }
+    page("Password reset", &body).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ResetQuery {
+    token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ResetForm {
+    token: String,
+    password: String,
+    confirm: String,
+    #[serde(default)]
+    csrf: String,
+}
+
+pub async fn reset_password_form(
+    State(_state): State<AppState>,
+    Query(q): Query<ResetQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let token = q.token.unwrap_or_default();
+    if token.is_empty() || token.len() > 128 {
+        return err_page("Missing or invalid reset token");
+    }
+    let csrf = ensure_csrf_cookie(&headers);
+    let esc_token = html_escape(&token);
+    let body = format!(
+        "<form method=\"post\" action=\"/reset-password\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <input type=\"hidden\" name=\"token\" value=\"{esc_token}\">\
+         <input type=\"password\" name=\"password\" minlength=\"10\" placeholder=\"New password (min 10 chars)\" required autofocus>\
+         <input type=\"password\" name=\"confirm\" minlength=\"10\" placeholder=\"Confirm new password\" required>\
+         <button>Reset password</button></form>"
+    );
+    let mut resp = page("Reset password", &body).into_response();
+    append_cookie(&mut resp, set_cookie_value(CSRF_COOKIE, &csrf, 3600));
+    resp
+}
+
+pub async fn reset_password_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ResetForm>,
+) -> Response {
+    if !csrf_ok(&headers, &f.csrf) {
+        return err_page("Invalid CSRF token");
+    }
+    if f.password.len() < 10 || f.password.len() > 1024 {
+        return err_page("Password must be 10–1024 characters");
+    }
+    if f.password != f.confirm {
+        return err_page("Passwords do not match");
+    }
+    let user_id = match state
+        .store
+        .consume_reset_token(&f.token, tokens::now_epoch() as u64)
+    {
+        Ok(Some(id)) => id,
+        Ok(None) => return err_page("Reset link is invalid or has expired"),
+        Err(_) => return err_page("Internal error"),
+    };
+    let hash = match crate::crypto::hash_password(&f.password) {
+        Ok(h) => h,
+        Err(_) => return err_page("Internal error"),
+    };
+    if state.store.set_password_hash(&user_id, Some(&hash)).is_err() {
+        return err_page("Could not update password");
+    }
+    let _ = state
+        .store
+        .audit("password_reset", Some(&user_id), json!({}));
+    page(
+        "Password reset",
+        "<p>Your password has been updated.</p><a href=\"/login\">Sign in</a>",
+    )
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
