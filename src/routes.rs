@@ -201,6 +201,10 @@ pub async fn login_form(
     // percent-encodes on submit). URL-encoding here caused double-encoding,
     // breaking the post-login redirect back into the OIDC flow.
     let n = html_escape(&next);
+    let register_href = format!(
+        "/register?next={}",
+        urlencoding::encode(&next)
+    );
     let body = format!(
         "<form method=\"post\" action=\"/login\">\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
@@ -212,7 +216,7 @@ pub async fn login_form(
          <form method=\"get\" action=\"/auth/github\">\
          <input type=\"hidden\" name=\"next\" value=\"{n}\">\
          <button class=\"gh\" {}>Sign in with GitHub</button></form>\
-         <p style=\"font-size:.8rem;text-align:center\"><a href=\"/register?next={n}\">Create account</a></p>",
+         <p style=\"font-size:.8rem;text-align:center\"><a href=\"{register_href}\">Create account</a></p>",
         if gh_enabled {
             ""
         } else {
