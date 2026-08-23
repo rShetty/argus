@@ -184,6 +184,11 @@ pub struct NextQuery {
     next: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct LogoutQuery {
+    post_logout_redirect_uri: Option<String>,
+}
+
 pub async fn login_form(
     State(state): State<AppState>,
     Query(q): Query<NextQuery>,
@@ -383,15 +388,27 @@ pub async fn register_submit(
     resp
 }
 
-pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LogoutQuery>,
+) -> Response {
     if let Some(sid) = cookie_value(&headers, SESSION_COOKIE) {
         let _ = state.store.delete_session(&sid);
     }
-    let mut resp = page(
-        "Signed out",
-        "<p>You are signed out.</p><a href=\"/login\">Sign in again</a>",
-    )
-    .into_response();
+    let safe_redirect = q
+        .post_logout_redirect_uri
+        .filter(|uri| state.store.is_allowed_logout_origin(uri))
+        .unwrap_or_default();
+    let mut resp = if !safe_redirect.is_empty() {
+        Redirect::to(&safe_redirect).into_response()
+    } else {
+        page(
+            "Signed out",
+            "<p>You are signed out.</p><a href=\"/login\">Sign in again</a>",
+        )
+        .into_response()
+    };
     append_cookie(
         &mut resp,
         format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
@@ -399,8 +416,12 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
     resp
 }
 
-pub async fn logout_get(state: State<AppState>, headers: HeaderMap) -> Response {
-    logout(state, headers).await
+pub async fn logout_get(
+    state: State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LogoutQuery>,
+) -> Response {
+    logout(state, headers, Query(q)).await
 }
 
 // ---------------------------------------------------------------------------

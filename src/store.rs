@@ -219,6 +219,38 @@ impl Store {
         })
     }
 
+    /// Returns true if the URI's origin matches any registered client's
+    /// redirect URI origin. Used to allowlist post-logout redirects.
+    pub fn is_allowed_logout_origin(&self, uri: &str) -> bool {
+        let origin = |url: &str| -> Option<String> {
+            url::Url::parse(url).ok().map(|u| {
+                format!(
+                    "{}://{}{}",
+                    u.scheme(),
+                    u.host_str().unwrap_or(""),
+                    u.port_or_known_default()
+                        .map(|p| format!(":{p}"))
+                        .unwrap_or_default(),
+                )
+            })
+        };
+        let target = origin(uri);
+        self.with_conn(|c| {
+            let mut st = c.prepare("SELECT redirect_uris FROM clients")?;
+            let mut rows = st.query([])?;
+            while let Some(row) = rows.next()? {
+                let uris: String = row.get(0)?;
+                for registered in uris.split('\n') {
+                    if origin(registered) == target {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        })
+        .unwrap_or(false)
+    }
+
     // ---- auth codes ----
     #[allow(clippy::too_many_arguments)]
     pub fn put_auth_code(&self, code: &AuthCode) -> anyhow::Result<()> {
