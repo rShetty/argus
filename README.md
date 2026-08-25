@@ -1,6 +1,6 @@
 # Argus 👁
 
-**OIDC identity provider for the six-project governance ecosystem.**
+**OIDC identity provider for the AI governance ecosystem governed through Governance Hub.**
 The hundred-eyed guardian: one never-sleeping watchman over every gateway.
 
 Humans sign in once (password or GitHub) and every ecosystem product trusts
@@ -30,6 +30,7 @@ GET  /health
 POST /api/agents                         register an agent (session required)
 GET  /api/agents                         list own agents
 POST /api/agents/{id}/status             revoke / re-activate (kill switch)
+POST /register-client                    RFC 7591 dynamic client registration
 ```
 
 ## Run
@@ -49,6 +50,8 @@ cargo test   # e2e: register→login→authorize(PKCE)→consent→token→useri
 ## Security notes
 
 - Passwords + agent secrets: **Argon2id**, constant-time compares everywhere.
+- `/register-client` creates public clients only (`token_endpoint_auth_method=none`),
+  restricts redirect URIs to HTTPS or localhost, and limits scopes to the OIDC set.
 - PKCE S256 enforced whenever a challenge is present; exact-match redirect URIs.
 - CSRF double-submit on all forms; session cookies HttpOnly/SameSite=Lax.
 - Agent tokens carry ≤15-min TTLs; `/introspect` refuses revoked agents even
