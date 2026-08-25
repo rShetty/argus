@@ -84,7 +84,7 @@ async fn discovery_and_jwks_work() {
     )
     .await;
     assert_eq!(s, 200);
-    assert!(b.contains("\"issuer\""));
+    assert!(b.contains("\"issuer\"") && b.contains("\"registration_endpoint\""));
     let (s2, b2, _) = req(app, "GET", "/jwks.json", vec![], None).await;
     assert_eq!(s2, 200);
     assert!(b2.contains("RS256") && b2.contains("\"n\""));
@@ -249,6 +249,30 @@ async fn full_oidc_flow_with_pkce_and_consent() {
     .await;
     assert_eq!(s, 200);
     assert!(body.contains("\"kind\":\"human\""), "{body}");
+}
+
+#[tokio::test]
+async fn dynamic_client_registration_creates_public_client() {
+    let state = test_state();
+    let app = router(state.clone());
+
+    let (status, body, _) = req(
+        app,
+        "POST",
+        "/register-client",
+        vec![("content-type", "application/json".into())],
+        Some(r#"{"client_name":"CIMD Client","redirect_uris":["http://127.0.0.1:9001/cb"],"scope":"openid profile email offline_access","token_endpoint_auth_method":"none"}"#.into()),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let registered: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let client_id = registered["client_id"].as_str().unwrap();
+    assert!(client_id.starts_with("dcr_"));
+    assert_eq!(registered["token_endpoint_auth_method"], "none");
+
+    let client = state.store.client(client_id).unwrap().unwrap();
+    assert!(client.secret_hash.is_none());
+    assert_eq!(client.registration_type, "dynamic");
 }
 
 fn extract_cookie(cookies: &[String], name: &str) -> String {

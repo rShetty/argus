@@ -36,10 +36,20 @@ impl Store {
         const M001: &str = include_str!("../migrations/001_init.sql");
         const M002: &str = include_str!("../migrations/002_agents.sql");
         const M003: &str = include_str!("../migrations/003_password_reset.sql");
+        const M004: &str = include_str!("../migrations/004_dynamic_clients.sql");
         self.with_conn(|c| {
             c.execute_batch(M001)?;
             c.execute_batch(M002)?;
             c.execute_batch(M003)?;
+            if c.query_row(
+                "SELECT 1 FROM pragma_table_info('clients') WHERE name='registration_type'",
+                [],
+                |_| Ok(()),
+            )
+            .is_err()
+            {
+                c.execute_batch(M004)?;
+            }
             Ok(())
         })
     }
@@ -63,7 +73,11 @@ impl Store {
     }
 
     /// Returns Some(user_id) if the token is valid and unused; marks it used.
-    pub fn consume_reset_token(&self, token: &str, now_epoch: u64) -> anyhow::Result<Option<String>> {
+    pub fn consume_reset_token(
+        &self,
+        token: &str,
+        now_epoch: u64,
+    ) -> anyhow::Result<Option<String>> {
         self.with_conn(|c| {
             let result = c.query_row(
                 "SELECT user_id FROM password_reset_tokens WHERE token=?1 AND used=0 AND expires_at > ?2",
@@ -80,6 +94,13 @@ impl Store {
             }
         })
     }
+}
+
+fn rand_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    crate::crypto::b64url(&bytes)
 }
 
 // ---- Typed rows -------------------------------------------------------------
@@ -242,13 +263,14 @@ impl Store {
                 .map(String::from)
                 .collect(),
             scopes: row.get(4)?,
+            registration_type: row.get(5)?,
         })
     }
 
     pub fn client(&self, client_id: &str) -> anyhow::Result<Option<Client>> {
         self.with_conn(|c| {
             let mut st = c.prepare(
-                "SELECT client_id, secret_hash, name, redirect_uris, scopes FROM clients WHERE client_id=?1",
+                "SELECT client_id, secret_hash, name, redirect_uris, scopes, registration_type FROM clients WHERE client_id=?1",
             )?;
             let mut rows = st.query([client_id])?;
             Ok(match rows.next()? {
@@ -256,6 +278,81 @@ impl Store {
                 None => None,
             })
         })
+    }
+
+    pub fn create_dynamic_client(
+        &self,
+        metadata: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let redirect_values = metadata["redirect_uris"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("redirect_uris array required"))?;
+        if redirect_values.is_empty() || redirect_values.len() > 10 {
+            return Err(anyhow::anyhow!("1-10 redirect_uris required"));
+        }
+
+        let mut redirect_uris = Vec::new();
+        for value in redirect_values {
+            let uri = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("redirect_uri must be a string"))?;
+            if !(uri.starts_with("http://localhost")
+                || uri.starts_with("http://127.0.0.1")
+                || uri.starts_with("https://"))
+            {
+                return Err(anyhow::anyhow!("redirect_uri must use HTTPS or localhost"));
+            }
+            redirect_uris.push(uri.to_string());
+        }
+
+        let scope = metadata["scope"]
+            .as_str()
+            .unwrap_or("openid profile email offline_access");
+        let allowed_scopes = ["openid", "profile", "email", "offline_access"];
+        if !scope
+            .split(' ')
+            .all(|requested| allowed_scopes.contains(&requested))
+        {
+            return Err(anyhow::anyhow!("requested scope not allowed"));
+        }
+        if matches!(
+            metadata["token_endpoint_auth_method"].as_str(),
+            Some(method) if method != "none"
+        ) {
+            return Err(anyhow::anyhow!("only public dynamic clients are supported"));
+        }
+
+        let client_id = format!("dcr_{}", rand_id());
+        let client_name = metadata["client_name"]
+            .as_str()
+            .unwrap_or("Dynamically registered client")
+            .chars()
+            .take(120)
+            .collect::<String>();
+        self.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO clients (client_id,secret_hash,name,redirect_uris,scopes,created_at,registration_type) VALUES (?1,NULL,?2,?3,?4,?5,'dynamic')",
+                rusqlite::params![
+                    client_id,
+                    client_name,
+                    redirect_uris.join("\n"),
+                    scope,
+                    tokens_now()
+                ],
+            )?;
+            Ok(())
+        })?;
+
+        Ok(serde_json::json!({
+            "client_id": client_id,
+            "client_id_issued_at": tokens_now(),
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+            "scope": scope,
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        }))
     }
 
     /// Returns true if the URI's origin matches any registered client's
@@ -445,6 +542,7 @@ pub struct Client {
     pub redirect_uris: Vec<String>,
     #[allow(dead_code)]
     pub scopes: String,
+    pub registration_type: String,
 }
 
 #[derive(Debug, Clone)]

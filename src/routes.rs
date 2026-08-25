@@ -22,10 +22,12 @@ fn now() -> u64 {
 
 /// Build a Set-Cookie value with the deployment-correct Secure flag.
 fn set_cookie_value(name: &str, value: &str, max_age: i64) -> String {
-    let secure = if crate::cookie_secure() { "; Secure" } else { "" };
-    format!(
-        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
-    )
+    let secure = if crate::cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!("{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}")
 }
 
 fn rand_token(bytes: usize) -> String {
@@ -157,6 +159,7 @@ pub async fn discovery(State(state): State<AppState>) -> Response {
             "code_challenge_methods_supported": ["S256"],
             "scopes_supported": ["openid", "profile", "email", "offline_access"],
             "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
+            "registration_endpoint": format!("{iss}/register-client"),
             "claims_supported": ["sub", "email", "name", "iss", "aud", "exp", "iat"],
         })),
     )
@@ -201,10 +204,7 @@ pub async fn login_form(
     // percent-encodes on submit). URL-encoding here caused double-encoding,
     // breaking the post-login redirect back into the OIDC flow.
     let n = html_escape(&next);
-    let register_href = format!(
-        "/register?next={}",
-        urlencoding::encode(&next)
-    );
+    let register_href = format!("/register?next={}", urlencoding::encode(&next));
     let body = format!(
         "<form method=\"post\" action=\"/login\">\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
@@ -464,21 +464,24 @@ pub async fn forgot_password_submit(
     let email = f.email.trim().to_lowercase();
     let user = state.store.user_by_email(&email).ok().flatten();
     // Always show the same message to prevent email enumeration.
-    let generic = "<p>If an account with that email exists, a reset link has been generated below.</p>";
+    let generic =
+        "<p>If an account with that email exists, a reset link has been generated below.</p>";
     let mut body = generic.to_string();
     if let Some(u) = user {
         let token = rand_token(32);
         let ttl: u64 = 30 * 60; // 30 minutes
         let _ = state
             .store
-            .put_reset_token(&token, &u.id, tokens::now_epoch() as u64, ttl);
+            .put_reset_token(&token, &u.id, tokens::now_epoch(), ttl);
         let link = format!("/reset-password?token={token}");
         body.push_str(&format!(
             "<p style=\"font-size:.85rem\">Reset link (valid 30 min):<br><a href=\"{link}\">{link}</a></p><p style=\"font-size:.75rem;color:#6b7280\">In production this link would be emailed instead of shown.</p>"
         ));
-        let _ = state
-            .store
-            .audit("password_reset_requested", Some(&u.id), json!({"email": email}));
+        let _ = state.store.audit(
+            "password_reset_requested",
+            Some(&u.id),
+            json!({"email": email}),
+        );
     }
     page("Password reset", &body).into_response()
 }
@@ -537,7 +540,7 @@ pub async fn reset_password_submit(
     }
     let user_id = match state
         .store
-        .consume_reset_token(&f.token, tokens::now_epoch() as u64)
+        .consume_reset_token(&f.token, tokens::now_epoch())
     {
         Ok(Some(id)) => id,
         Ok(None) => return err_page("Reset link is invalid or has expired"),
@@ -547,7 +550,11 @@ pub async fn reset_password_submit(
         Ok(h) => h,
         Err(_) => return err_page("Internal error"),
     };
-    if state.store.set_password_hash(&user_id, Some(&hash)).is_err() {
+    if state
+        .store
+        .set_password_hash(&user_id, Some(&hash))
+        .is_err()
+    {
         return err_page("Could not update password");
     }
     let _ = state
@@ -1933,6 +1940,43 @@ pub async fn admin_create_client(
         })),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct DynamicClientRegistration {
+    #[serde(default)]
+    pub client_name: Option<String>,
+    pub redirect_uris: Vec<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub token_endpoint_auth_method: Option<String>,
+}
+
+/// RFC 7591 dynamic client registration. Public clients only; no secret is
+/// returned because PKCE protects the authorization-code exchange.
+pub async fn register_client(
+    State(state): State<AppState>,
+    Json(metadata): Json<DynamicClientRegistration>,
+) -> Response {
+    let requested = serde_json::json!({
+        "client_name": metadata.client_name,
+        "redirect_uris": metadata.redirect_uris,
+        "scope": metadata.scope,
+        "token_endpoint_auth_method": metadata
+            .token_endpoint_auth_method
+            .unwrap_or_else(|| "none".to_string()),
+    });
+    match state.store.create_dynamic_client(&requested) {
+        Ok(response) => (StatusCode::CREATED, axum::Json(response)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(
+                json!({"error": "invalid_client_metadata", "error_description": error.to_string()}),
+            ),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -72,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/agents/mint", post(routes::agents_mint))
         .route("/api/admin/clients", post(routes::admin_create_client))
+        .route("/register-client", post(routes::register_client))
         // Ops
         .route("/health", get(routes::health))
         .layer(axum::middleware::map_response(
